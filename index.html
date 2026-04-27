@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+  <style>
+    body {
+      background: linear-gradient(135deg, #020617, #0f172a, #020617);
+      color: white;
+      font-family: 'Inter', sans-serif;
+      padding: 20px;
+    }
+
+    /* GRID */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+    }
+
+    /* CARD */
+    .card {
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 20px;
+      padding: 20px;
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    /* VALUE */
+    .value {
+      font-size: 32px;
+      font-weight: 700;
+    }
+
+    /* STATUS */
+    .status {
+      padding: 10px;
+      border-radius: 12px;
+      text-align: center;
+    }
+
+    .normal {
+      background: rgba(34, 197, 94, 0.2);
+      color: #4ade80;
+    }
+
+    .fault {
+      background: rgba(239, 68, 68, 0.2);
+      color: #f87171;
+    }
+
+    .warning {
+      background: rgba(234, 179, 8, 0.2);
+      color: #facc15;
+    }
+
+    /* BUTTONS */
+    .btn {
+      padding: 10px;
+      margin: 5px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+    }
+
+    /* RISK */
+    .risk-bar {
+      height: 10px;
+      background: #333;
+      border-radius: 10px;
+    }
+
+    .risk-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 10px;
+    }
+
+    /* SMALL TEXT */
+    .small {
+      font-size: 12px;
+      color: #94a3b8;
+    }
+
+    /* TTF */
+    #ttf {
+      font-size: 28px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h2>⚡ Smart Power Monitor</h2>
+
+  <div class="grid">
+
+    <div class="card">
+      <div>Voltage</div>
+      <div id="v" class="value">--</div>
+    </div>
+    <div class="card">
+      <div>Current</div>
+      <div id="c" class="value">--</div>
+    </div>
+    <div class="card">
+      <div>Power</div>
+      <div id="p" class="value">--</div>
+    </div>
+
+    <div class="card">
+      <div>Power Factor</div>
+      <div id="pf" class="value">--</div>
+      <div id="pfStatus" class="small"></div>
+    </div>
+
+    <div class="card">
+      <div>System Status</div>
+      <div id="status" class="status normal">--</div>
+    </div>
+
+    <div class="card">
+      <div>Relay</div>
+      <div id="relay" class="status normal">--</div>
+    </div>
+
+    <!-- MAINTENANCE TIMER -->
+    <div class="card">
+      <div>Maintenance Timer</div>
+      <div id="ttf" class="value">--</div>
+      <div id="ttfStatus" class="small"></div>
+    </div>
+
+    <!-- CONTROL -->
+    <div class="card">
+      <button class="btn" onclick="sendCmd('AUTO')">AUTO</button>
+      <button class="btn" onclick="sendCmd('MANUAL')">MANUAL</button>
+      <button class="btn" onclick="sendCmd('ON')">ON</button>
+      <button class="btn" onclick="sendCmd('OFF')">OFF</button>
+    </div>
+
+    <!-- RISK -->
+    <div class="card">
+      <div>Risk</div>
+      <div class="risk-bar">
+        <div id="riskFill" class="risk-fill"></div>
+      </div>
+      <div id="riskText">0%</div>
+    </div>
+
+  </div>
+
+  <h3>📊 Analytics</h3>
+
+  <div class="grid">
+    <div class="card">
+      <div>Energy</div>
+      <div id="energy">0</div>
+    </div>
+    <div class="card">
+      <div>Cost</div>
+      <div id="cost">0</div>
+    </div>
+    <div class="card">
+      <div>Peak</div>
+      <div id="peak">0</div>
+    </div>
+  </div>
+
+  <h3>📈 Graph</h3>
+  <canvas id="chart"></canvas>
+
+  <h3>🤖 Prediction</h3>
+  <canvas id="predChart"></canvas>
+
+  <ul id="log"></ul>
+
+  <script>
+
+    // MQTT
+    const client = mqtt.connect("wss://e1e5d7114287462bb3aab6e5f3508570.s1.eu.hivemq.cloud:8884/mqtt", {
+      username: "Ayush2006",
+      password: "Ayush2006@"
+    });
+
+    client.on("connect", () => {
+      console.log("✅ MQTT Connected");
+      client.subscribe("substation/json");
+    });
+
+    client.on("error", (err) => {
+      console.log("❌ MQTT Error:", err);
+    });
+
+    // ENERGY & TIME
+    let energy = parseFloat(localStorage.getItem('energy')) || 0;
+    let peak = parseFloat(localStorage.getItem('peak')) || 0;
+    let lastTime = Date.now();
+
+    // TIME TO FAILURE INTERVAL
+    let currentTTF = -1;
+    setInterval(() => {
+      if (currentTTF > 0) {
+        currentTTF -= 0.5;
+        const ttfEl = document.getElementById("ttf");
+        if (ttfEl) ttfEl.innerText = currentTTF.toFixed(1) + " sec";
+      }
+    }, 500);
+
+    // CHART
+    const chart = new Chart(document.getElementById("chart"), {
+      type: "line",
+      data: {
+        labels: [], datasets: [
+          { label: "Voltage", data: [], borderColor: "yellow" },
+          { label: "Current", data: [], borderColor: "cyan" }
+        ]
+      }
+    });
+
+    // PREDICTION CHART
+    const predChart = new Chart(document.getElementById("predChart"), {
+      type: "line",
+      data: {
+        labels: [], datasets: [
+          { label: "Actual", data: [], borderColor: "white" },
+          { label: "Linear", data: [], borderColor: "yellow" },
+          { label: "AI", data: [], borderColor: "magenta" }
+        ]
+      }
+    });
+
+    // LOG
+    function addLog(txt) {
+      let li = document.createElement("li");
+      li.innerText = new Date().toLocaleTimeString() + " " + txt;
+      document.getElementById("log").prepend(li);
+    }
+
+    // DATA
+    client.on("message", (topic, msg) => {
+      console.log("📩 Received:", msg.toString());
+      let d = JSON.parse(msg.toString());
+
+      // VALUES
+      document.getElementById("v").innerText = d.voltage + " V";
+      document.getElementById("c").innerText = d.current + " A";
+      document.getElementById("p").innerText = d.power + " W";
+      document.getElementById("pf").innerText = d.pf;
+
+      // PF STATUS
+      document.getElementById("pfStatus").innerText = d.pf < 0.8 ? "LOW PF ⚠️" : "GOOD";
+
+      // STATUS
+      const statusEl = document.getElementById("status");
+      let currentStatus = "NORMAL";
+      let statusClass = "status normal";
+
+      if (d.current > 10.0) {
+        currentStatus = "OVERCURRENT";
+        statusClass = "status fault";
+      } else if (d.voltage > 250.0) {
+        currentStatus = "OVERVOLTAGE";
+        statusClass = "status fault";
+      } else if (d.voltage < 180.0) {
+        currentStatus = "UNDERVOLTAGE";
+        statusClass = "status fault";
+      } else if (d.fault === "YES") {
+        currentStatus = "FAULT";
+        statusClass = "status fault";
+      } else if (d.risk > 60) {
+        currentStatus = "WARNING";
+        statusClass = "status warning";
+      }
+
+      if (statusEl.innerText !== currentStatus) {
+        if (statusClass === "status fault" || statusClass === "status warning") {
+          addLog(currentStatus);
+        }
+      }
+
+      statusEl.className = statusClass;
+      statusEl.innerText = currentStatus;
+
+      // RELAY
+      const relayEl = document.getElementById("relay");
+      relayEl.innerText = d.relay;
+      relayEl.className = d.relay === "ON" ? "status normal" : "status fault";
+
+      // RISK
+      const riskFillEl = document.getElementById("riskFill");
+      const riskTextEl = document.getElementById("riskText");
+      riskFillEl.style.width = d.risk + "%";
+      riskFillEl.style.background = d.risk < 40 ? "green" : d.risk < 70 ? "orange" : "red";
+      riskTextEl.innerText = d.risk + "%";
+
+      // ================= TIME TO FAILURE UI =================
+      let ttf = d.time_to_failure;
+
+      const ttfEl = document.getElementById("ttf");
+      const ttfStatus = document.getElementById("ttfStatus");
+
+      if (ttf == -1) {
+        ttfEl.innerText = "Stable";
+        ttfEl.style.color = "green";
+        ttfStatus.innerText = "No risk";
+        currentTTF = -1;
+      }
+      else if (ttf == 0) {
+        ttfEl.innerText = "FAULT!";
+        ttfEl.style.color = "red";
+        ttfStatus.innerText = "Immediate action required";
+        currentTTF = 0;
+      }
+      else {
+        ttfEl.innerText = ttf.toFixed(1) + " sec";
+        currentTTF = ttf;
+
+        if (ttf < 10) {
+          ttfEl.style.color = "red";
+          ttfStatus.innerText = "Critical ⚠️";
+        }
+        else if (ttf < 20) {
+          ttfEl.style.color = "orange";
+          ttfStatus.innerText = "Warning";
+        }
+        else {
+          ttfEl.style.color = "green";
+          ttfStatus.innerText = "Safe";
+        }
+      }
+
+      // ANALYTICS
+      let now = Date.now();
+      let dt = (now - lastTime) / 1000.0;
+      lastTime = now;
+      if (dt > 10) dt = 0.5; // Prevent huge spikes on first load
+
+      energy += d.power * (dt / 3600) / 1000;
+      peak = Math.max(peak, d.power);
+
+      localStorage.setItem('energy', energy);
+      localStorage.setItem('peak', peak);
+
+      document.getElementById("energy").innerText = energy.toFixed(5);
+      document.getElementById("cost").innerText = "$" + (energy * 0.15).toFixed(4);
+      document.getElementById("peak").innerText = peak.toFixed(1);
+
+      // MAIN GRAPH
+      chart.data.labels.push("");
+      chart.data.datasets[0].data.push(d.voltage);
+      chart.data.datasets[1].data.push(d.current);
+
+      if (chart.data.labels.length > 20) {
+        chart.data.labels.shift();
+        chart.data.datasets.forEach(ds => ds.data.shift());
+      }
+      chart.update();
+
+      // PREDICTION GRAPH
+      predChart.data.labels.push("");
+      predChart.data.datasets[0].data.push(d.current);
+      predChart.data.datasets[1].data.push(d.linear_pred);
+      predChart.data.datasets[2].data.push(d.ai_pred);
+
+      if (predChart.data.labels.length > 20) {
+        predChart.data.labels.shift();
+        predChart.data.datasets.forEach(ds => ds.data.shift());
+      }
+      predChart.update();
+
+    });
+
+    // CONTROL
+    function sendCmd(cmd) {
+      client.publish("substation/control", cmd);
+    }
+
+  </script>
+
+</body>
+
+</html>
